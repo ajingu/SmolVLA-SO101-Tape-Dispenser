@@ -6,8 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "huggingface-hub",
-    "lerobot[feetech]",
+    "lerobot[feetech,smolvla]",
     "opencv-python",
+    "pandas",
+    "pyarrow",
     "pyserial",
     "torch>=2.10",
     "torchvision>=0.25",

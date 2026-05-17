@@ -14,7 +14,7 @@ from urllib.parse import urlparse
 import cv2
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "camera_config.json"
+DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "cameras" / "camera_config.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "camera_checks"
 
 

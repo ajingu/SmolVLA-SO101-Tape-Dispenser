@@ -3,14 +3,15 @@ from __future__ import annotations
 import argparse
 import sys
 
-from svla import cameras, ports, soarm
+from svla import cameras, datasets, ports, soarm
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="so101")
+    parser = argparse.ArgumentParser(prog="svla")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     cameras.register_parsers(subparsers)
+    datasets.register_parsers(subparsers)
     ports.register_parsers(subparsers)
     soarm.register_parsers(subparsers)
 

@@ -1,0 +1,14 @@
+{
+  "Pick up the cube and place it in the target area": [
+    "Pick up the cube and place it in the target area.",
+    "Move the cube into the target area.",
+    "Grasp the cube and put it in the target area.",
+    "Use the robot arm to place the cube in the target area."
+  ],
+  "Pick up the object": [
+    "Pick up the object.",
+    "Please pick up the object.",
+    "Use the robot arm to pick up the object.",
+    "Grasp the object and lift it."
+  ]
+}

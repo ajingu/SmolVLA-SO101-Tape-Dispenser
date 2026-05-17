@@ -16,7 +16,7 @@ env/
 
 # LeRobot / experiment outputs
 camera_checks/
-configs/camera_config.json
+configs/cameras/camera_config.json
 data/
 outputs/
 runs/

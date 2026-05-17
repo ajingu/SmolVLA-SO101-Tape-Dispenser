@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -14,7 +15,11 @@ from svla.commands import run
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CALIBRATION_DIR = PROJECT_ROOT / "calibration"
 DEFAULT_DATASET_DIR = PROJECT_ROOT / "outputs" / "datasets"
+DEFAULT_TRAIN_DATASET_DIR = DEFAULT_DATASET_DIR / "train"
+DEFAULT_EVAL_DATASET_DIR = DEFAULT_DATASET_DIR / "eval"
 DEFAULT_TRAIN_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "train"
+DEFAULT_SMOLVLA_POLICY_PATH = "lerobot/smolvla_base"
+DEFAULT_SMOLVLA_ROLLOUT_REPO_ID = "local/eval_smolvla-base-rollout"
 
 
 def find_ports() -> int:
@@ -131,8 +136,33 @@ def teleoperate_command(args: argparse.Namespace) -> int:
     )
 
 
-def lerobot_dataset_path(repo_id: str) -> Path:
-    return DEFAULT_DATASET_DIR / Path(repo_id)
+def dataset_root_for_repo(repo_id: str) -> Path:
+    _, _, name = repo_id.rpartition("/")
+    if name.startswith("eval_"):
+        return DEFAULT_EVAL_DATASET_DIR
+    return DEFAULT_TRAIN_DATASET_DIR
+
+
+def lerobot_dataset_path(repo_id: str, dataset_root: str | Path | None = None) -> Path:
+    root = Path(dataset_root) if dataset_root else dataset_root_for_repo(repo_id)
+    return root / Path(repo_id)
+
+
+def find_lerobot_dataset_path(repo_id: str) -> Path:
+    preferred_path = lerobot_dataset_path(repo_id)
+    if preferred_path.exists():
+        return preferred_path
+
+    candidates = [
+        DEFAULT_TRAIN_DATASET_DIR / Path(repo_id),
+        DEFAULT_EVAL_DATASET_DIR / Path(repo_id),
+        DEFAULT_DATASET_DIR / Path(repo_id),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+
+    return preferred_path
 
 
 def remove_existing_dataset(repo_id: str) -> None:
@@ -171,7 +201,7 @@ def record_dataset(
     follower_id = follower_id or "follower"
     calib_dir = calibration_dir(calibration_dir_value)
     camera_config_path = Path(camera_config or cameras.DEFAULT_CONFIG_PATH)
-    dataset_root_path = Path(dataset_root) if dataset_root else lerobot_dataset_path(repo_id)
+    dataset_root_path = lerobot_dataset_path(repo_id, dataset_root)
 
     if overwrite and resume:
         raise RuntimeError("--overwrite and --resume cannot be used together")
@@ -243,9 +273,9 @@ def record_command(args: argparse.Namespace) -> int:
 
 def rollout_policy(
     follower_port: str,
-    policy_path: str,
-    repo_id: str,
-    task: str,
+    policy_path: str = DEFAULT_SMOLVLA_POLICY_PATH,
+    repo_id: str = DEFAULT_SMOLVLA_ROLLOUT_REPO_ID,
+    task: str = "Pick up the object",
     leader_port: str | None = None,
     leader_id: str | None = None,
     follower_id: str | None = None,
@@ -268,7 +298,7 @@ def rollout_policy(
     repo_id = _policy_eval_repo_id(repo_id)
     calib_dir = calibration_dir(calibration_dir_value)
     camera_config_path = Path(camera_config or cameras.DEFAULT_CONFIG_PATH)
-    dataset_root_path = Path(dataset_root) if dataset_root else lerobot_dataset_path(repo_id)
+    dataset_root_path = lerobot_dataset_path(repo_id, dataset_root)
 
     if overwrite:
         remove_existing_dataset(repo_id)
@@ -321,6 +351,31 @@ def rollout_policy(
     return run(command)
 
 
+def smolvla_check_command(_: argparse.Namespace) -> int:
+    required_modules = {
+        "accelerate": "accelerate",
+        "num2words": "num2words",
+        "safetensors": "safetensors",
+        "transformers": "transformers",
+        "lerobot.policies.smolvla": "lerobot[smolvla]",
+    }
+    missing = []
+    for module, package in required_modules.items():
+        if importlib.util.find_spec(module) is None:
+            missing.append(package)
+
+    if missing:
+        print("Missing SmolVLA dependencies:")
+        for package in missing:
+            print(f"  - {package}")
+        print("Run: uv sync")
+        return 1
+
+    print("SmolVLA dependencies are available.")
+    print(f"Default policy path: {DEFAULT_SMOLVLA_POLICY_PATH}")
+    return 0
+
+
 def rollout_command(args: argparse.Namespace) -> int:
     return rollout_policy(
         follower_port=args.follower_port,
@@ -347,12 +402,12 @@ def rollout_command(args: argparse.Namespace) -> int:
 
 
 def dataset_path_command(args: argparse.Namespace) -> int:
-    print(lerobot_dataset_path(args.repo_id))
+    print(find_lerobot_dataset_path(args.repo_id))
     return 0
 
 
 def dataset_open_command(args: argparse.Namespace) -> int:
-    dataset_path = lerobot_dataset_path(args.repo_id)
+    dataset_path = find_lerobot_dataset_path(args.repo_id)
     print(dataset_path)
 
     if not dataset_path.exists():
@@ -367,7 +422,8 @@ def dataset_open_command(args: argparse.Namespace) -> int:
 
 
 def dataset_info_command(args: argparse.Namespace) -> int:
-    info_path = lerobot_dataset_path(args.repo_id) / "meta" / "info.json"
+    dataset_path = find_lerobot_dataset_path(args.repo_id)
+    info_path = dataset_path / "meta" / "info.json"
     if not info_path.exists():
         print(f"Dataset info not found: {info_path}")
         return 1
@@ -378,7 +434,7 @@ def dataset_info_command(args: argparse.Namespace) -> int:
     ]
 
     print(f"repo_id: {args.repo_id}")
-    print(f"path: {lerobot_dataset_path(args.repo_id)}")
+    print(f"path: {dataset_path}")
     print(f"total_episodes: {info.get('total_episodes')}")
     print(f"total_frames: {info.get('total_frames')}")
     print(f"fps: {info.get('fps')}")
@@ -408,7 +464,8 @@ def _policy_eval_repo_id(repo_id: str) -> str:
 def train_policy(
     repo_id: str,
     dataset_root: str | None = None,
-    policy: str = "act",
+    policy: str = "smolvla",
+    pretrained_path: str | None = DEFAULT_SMOLVLA_POLICY_PATH,
     device: str = "cuda",
     output_dir: str | None = None,
     job_name: str | None = None,
@@ -423,15 +480,16 @@ def train_policy(
     wandb_mode: str | None = None,
     push_to_hub: bool = False,
     policy_repo_id: str | None = None,
+    image_aug: bool = False,
+    image_aug_max_num_transforms: int = 3,
+    image_aug_random_order: bool = False,
 ) -> int:
-    dataset_root_path = Path(dataset_root) if dataset_root else lerobot_dataset_path(repo_id)
+    dataset_root_path = lerobot_dataset_path(repo_id, dataset_root)
     run_name = job_name or f"{policy}_{_safe_name(repo_id)}"
     output_dir_path = Path(output_dir) if output_dir else DEFAULT_TRAIN_OUTPUT_DIR / run_name
 
     command = [
-        sys.executable,
-        "-m",
-        "train",
+        "lerobot-train",
         f"--dataset.repo_id={repo_id}",
         f"--dataset.root={dataset_root_path}",
         f"--policy.type={policy}",
@@ -448,6 +506,16 @@ def train_policy(
         "--wandb.disable_artifact=true",
     ]
 
+    if pretrained_path:
+        command.append(f"--policy.pretrained_path={pretrained_path}")
+    if image_aug:
+        command.extend(
+            [
+                "--dataset.image_transforms.enable=true",
+                f"--dataset.image_transforms.max_num_transforms={image_aug_max_num_transforms}",
+                f"--dataset.image_transforms.random_order={str(image_aug_random_order).lower()}",
+            ]
+        )
     if wandb_project:
         command.append(f"--wandb.project={wandb_project}")
     if wandb_entity:
@@ -465,6 +533,7 @@ def train_command(args: argparse.Namespace) -> int:
         repo_id=args.repo_id,
         dataset_root=args.dataset_root,
         policy=args.policy,
+        pretrained_path=args.pretrained_path,
         device=args.device,
         output_dir=args.output_dir,
         job_name=args.job_name,
@@ -479,6 +548,9 @@ def train_command(args: argparse.Namespace) -> int:
         wandb_mode=args.wandb_mode,
         push_to_hub=args.push_to_hub,
         policy_repo_id=args.policy_repo_id,
+        image_aug=args.image_aug,
+        image_aug_max_num_transforms=args.image_aug_max_num_transforms,
+        image_aug_random_order=args.image_aug_random_order,
     )
 
 
@@ -579,8 +651,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     rollout_parser = subparsers.add_parser("rollout")
     rollout_parser.add_argument("--leader-port")
     rollout_parser.add_argument("--follower-port", required=True)
-    rollout_parser.add_argument("--policy-path", required=True)
-    rollout_parser.add_argument("--repo-id", default="local/eval_so101-rollout-smoke")
+    rollout_parser.add_argument("--policy-path", default=DEFAULT_SMOLVLA_POLICY_PATH)
+    rollout_parser.add_argument("--repo-id", default=DEFAULT_SMOLVLA_ROLLOUT_REPO_ID)
     rollout_parser.add_argument(
         "--task",
         default="Pick up the object",
@@ -606,6 +678,34 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     rollout_parser.set_defaults(use_amp=True)
     rollout_parser.set_defaults(wait_start=True)
     rollout_parser.set_defaults(func=rollout_command)
+
+    smolvla_check_parser = subparsers.add_parser("smolvla-check")
+    smolvla_check_parser.set_defaults(func=smolvla_check_command)
+
+    train_parser = subparsers.add_parser("train")
+    train_parser.add_argument("--repo-id", required=True)
+    train_parser.add_argument("--dataset-root")
+    train_parser.add_argument("--policy", default="smolvla")
+    train_parser.add_argument("--pretrained-path", default=DEFAULT_SMOLVLA_POLICY_PATH)
+    train_parser.add_argument("--device", default="cuda")
+    train_parser.add_argument("--output-dir")
+    train_parser.add_argument("--job-name")
+    train_parser.add_argument("--steps", type=int, default=3000)
+    train_parser.add_argument("--batch-size", type=int, default=8)
+    train_parser.add_argument("--save-freq", type=int, default=1000)
+    train_parser.add_argument("--eval-freq", type=int, default=0)
+    train_parser.add_argument("--no-use-amp", action="store_false", dest="use_amp")
+    train_parser.add_argument("--wandb", action="store_true")
+    train_parser.add_argument("--wandb-project")
+    train_parser.add_argument("--wandb-entity")
+    train_parser.add_argument("--wandb-mode")
+    train_parser.add_argument("--push-to-hub", action="store_true")
+    train_parser.add_argument("--policy-repo-id")
+    train_parser.add_argument("--image-aug", action="store_true")
+    train_parser.add_argument("--image-aug-max-num-transforms", type=int, default=3)
+    train_parser.add_argument("--image-aug-random-order", action="store_true")
+    train_parser.set_defaults(use_amp=True)
+    train_parser.set_defaults(func=train_command)
 
     dataset_path_parser = subparsers.add_parser("dataset-path")
     dataset_path_parser.add_argument("--repo-id", required=True)
