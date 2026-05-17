@@ -1,0 +1,22 @@
+{
+  "cameras": [
+    {
+      "name": "wrist",
+      "index": 0,
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "focus_lock_after_s": 5,
+      "zoom": 0
+    },
+    {
+      "name": "upper",
+      "index": 1,
+      "width": 1280,
+      "height": 720,
+      "fps": 30,
+      "focus_lock_after_s": 5,
+      "zoom": 0
+    }
+  ]
+}

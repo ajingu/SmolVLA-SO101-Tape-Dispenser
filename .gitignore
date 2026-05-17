@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Environments
+.env
+.venv/
+venv/
+env/
+.uv-cache/
+
+# LeRobot / experiment outputs
+camera_checks/
+configs/camera_config.json
+data/
+outputs/
+runs/
+wandb/
+checkpoints/
+videos/
+*.safetensors
+*.pt
+*.pth
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
