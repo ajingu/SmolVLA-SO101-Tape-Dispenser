@@ -16,6 +16,15 @@ import cv2
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = PROJECT_ROOT / "configs" / "cameras" / "camera_config.json"
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "outputs" / "camera_checks"
+CV2_BACKEND_CODES = {
+    "ANY": cv2.CAP_ANY,
+    "V4L2": cv2.CAP_V4L2,
+    "DSHOW": cv2.CAP_DSHOW,
+    "PVAPI": cv2.CAP_PVAPI,
+    "ANDROID": cv2.CAP_ANDROID,
+    "AVFOUNDATION": cv2.CAP_AVFOUNDATION,
+    "MSMF": cv2.CAP_MSMF,
+}
 
 
 def load_camera_config(config_path: Path) -> list[dict[str, Any]]:
@@ -29,34 +38,77 @@ def load_camera_config(config_path: Path) -> list[dict[str, Any]]:
     return cameras
 
 
-def lerobot_cameras_arg(config_path: Path) -> str:
+def lerobot_cameras_arg(
+    config_path: Path,
+    name_map: dict[str, str] | None = None,
+) -> str:
     cameras = load_camera_config(config_path)
     camera_items = []
+    name_map = name_map or {}
 
     for camera in cameras:
-        name = camera["name"]
+        config_name = str(camera["name"])
+        name = name_map.get(config_name, config_name)
         index_or_path = camera.get("index_or_path", camera.get("index"))
         width = camera["width"]
         height = camera["height"]
         fps = camera["fps"]
         camera_type = camera.get("type", "opencv")
 
-        camera_items.append(
-            f"{name}: {{type: {camera_type}, index_or_path: {index_or_path}, "
-            f"width: {width}, height: {height}, fps: {fps}}}"
-        )
+        fields = [
+            f"type: {camera_type}",
+            f"index_or_path: {index_or_path}",
+            f"width: {width}",
+            f"height: {height}",
+            f"fps: {fps}",
+        ]
+        if camera.get("fourcc") is not None:
+            fields.append(f"fourcc: {camera['fourcc']}")
+        if camera.get("backend") is not None:
+            fields.append(f"backend: {_cv2_backend_code(camera['backend'])}")
+        for optional_key in ("color_mode", "rotation", "warmup_s"):
+            if camera.get(optional_key) is not None:
+                fields.append(f"{optional_key}: {camera[optional_key]}")
+
+        camera_items.append(f"{name}: {{" + ", ".join(fields) + "}")
 
     return "{ " + ", ".join(camera_items) + " }"
 
 
-def _open_camera(
-    index_or_path: int | str, width: int | None, height: int | None, fps: int | None
-) -> cv2.VideoCapture:
-    if isinstance(index_or_path, int):
-        cap = cv2.VideoCapture(index_or_path, cv2.CAP_DSHOW)
-    else:
-        cap = cv2.VideoCapture(index_or_path, cv2.CAP_ANY)
+def _cv2_backend_code(backend: int | str | None) -> int | None:
+    if backend is None:
+        return None
+    if isinstance(backend, int):
+        return backend
 
+    backend_text = backend.strip().upper()
+    if backend_text.isdigit():
+        return int(backend_text)
+    backend_text = backend_text.removeprefix("CAP_")
+    if backend_text in CV2_BACKEND_CODES:
+        return int(CV2_BACKEND_CODES[backend_text])
+
+    raise ValueError(f"Unsupported OpenCV backend: {backend}")
+
+
+def _open_camera(
+    index_or_path: int | str,
+    width: int | None,
+    height: int | None,
+    fps: int | None,
+    fourcc: str | None = None,
+    backend: int | str | None = None,
+) -> cv2.VideoCapture:
+    backend_code = _cv2_backend_code(backend)
+    if backend_code is None:
+        backend_code = cv2.CAP_DSHOW if isinstance(index_or_path, int) else cv2.CAP_ANY
+
+    cap = cv2.VideoCapture(index_or_path, backend_code)
+
+    if fourcc is not None:
+        if len(fourcc) != 4:
+            raise ValueError(f"fourcc must be a 4-character string: {fourcc}")
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*fourcc))
     if width is not None:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
     if height is not None:
@@ -112,11 +164,13 @@ def _lock_focus_after_autofocus(name: str, cap: cv2.VideoCapture, seconds: float
     )
 
 
-def _camera_info(cap: cv2.VideoCapture) -> tuple[int, int, float]:
+def _camera_info(cap: cv2.VideoCapture) -> tuple[int, int, float, str]:
     width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     fps = cap.get(cv2.CAP_PROP_FPS)
-    return width, height, fps
+    fourcc_code = int(cap.get(cv2.CAP_PROP_FOURCC))
+    fourcc = "".join(chr((fourcc_code >> 8 * index) & 0xFF) for index in range(4))
+    return width, height, fps, fourcc
 
 
 def _camera_index_or_path(camera: dict[str, Any]) -> int | str:
@@ -235,8 +289,17 @@ def check_cameras(
             camera_width = camera.get("width", width)
             camera_height = camera.get("height", height)
             camera_fps = camera.get("fps", fps)
+            camera_fourcc = camera.get("fourcc")
+            camera_backend = camera.get("backend")
 
-            cap = _open_camera(index_or_path, camera_width, camera_height, camera_fps)
+            cap = _open_camera(
+                index_or_path,
+                camera_width,
+                camera_height,
+                camera_fps,
+                camera_fourcc,
+                camera_backend,
+            )
             if not cap.isOpened():
                 print(f"{name} ({index_or_path}): failed to open")
                 continue
@@ -249,12 +312,12 @@ def check_cameras(
                 cap.release()
                 continue
 
-            actual_width, actual_height, actual_fps = _camera_info(cap)
+            actual_width, actual_height, actual_fps, actual_fourcc = _camera_info(cap)
             image_path = output_dir / f"{name}_{timestamp}.jpg"
             cv2.imwrite(str(image_path), frame)
             print(
                 f"{name} ({index_or_path}): {actual_width}x{actual_height} @ {actual_fps:.1f} fps, "
-                f"snapshot={image_path}"
+                f"fourcc={actual_fourcc}, snapshot={image_path}"
             )
             captures.append((name, cap))
 
@@ -289,17 +352,26 @@ def preview_cameras(
             camera_width = camera.get("width", width)
             camera_height = camera.get("height", height)
             camera_fps = camera.get("fps", fps)
+            camera_fourcc = camera.get("fourcc")
+            camera_backend = camera.get("backend")
 
-            cap = _open_camera(index_or_path, camera_width, camera_height, camera_fps)
+            cap = _open_camera(
+                index_or_path,
+                camera_width,
+                camera_height,
+                camera_fps,
+                camera_fourcc,
+                camera_backend,
+            )
             if not cap.isOpened():
                 print(f"{name} ({index_or_path}): failed to open")
                 continue
 
             _apply_camera_properties(name, cap, camera)
-            actual_width, actual_height, actual_fps = _camera_info(cap)
+            actual_width, actual_height, actual_fps, actual_fourcc = _camera_info(cap)
             print(
                 f"{name} ({index_or_path}): previewing "
-                f"{actual_width}x{actual_height} @ {actual_fps:.1f} fps"
+                f"{actual_width}x{actual_height} @ {actual_fps:.1f} fps, fourcc={actual_fourcc}"
             )
             captures.append(
                 {
@@ -310,6 +382,7 @@ def preview_cameras(
                     "width": actual_width,
                     "height": actual_height,
                     "fps": actual_fps,
+                    "fourcc": actual_fourcc,
                 }
             )
 
@@ -370,7 +443,8 @@ def _preview_server(
                 width = int(capture["width"])
                 height = int(capture["height"])
                 fps = float(capture["fps"])
-                camera_label = f"{index_or_path} - {width}x{height} @ {fps:.1f} fps"
+                fourcc = str(capture["fourcc"])
+                camera_label = f"{index_or_path} - {width}x{height} @ {fps:.1f} fps - {fourcc}"
                 cards.append(
                     f"""
                     <section>

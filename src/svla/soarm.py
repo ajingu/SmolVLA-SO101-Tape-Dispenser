@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from svla import cameras
@@ -136,6 +137,261 @@ def teleoperate_command(args: argparse.Namespace) -> int:
     )
 
 
+def relax_follower(
+    follower_port: str,
+    follower_id: str | None = None,
+    calibration_dir_value: str | None = None,
+) -> int:
+    from lerobot.robots.so_follower.config_so_follower import SOFollowerRobotConfig
+    from lerobot.robots.so_follower.so_follower import SOFollower
+
+    follower_id = follower_id or "follower"
+    calib_dir = calibration_dir(calibration_dir_value)
+    config = SOFollowerRobotConfig(
+        port=follower_port,
+        id=follower_id,
+        calibration_dir=Path(calib_dir),
+        disable_torque_on_disconnect=True,
+        cameras={},
+    )
+    robot = SOFollower(config)
+
+    print("Support the follower arm before releasing torque.")
+    robot.bus.connect()
+    try:
+        robot.bus.disable_torque(num_retry=5)
+        print("Follower torque disabled.")
+    finally:
+        if robot.bus.is_connected:
+            robot.bus.disconnect(disable_torque=True)
+
+    return 0
+
+
+def relax_command(args: argparse.Namespace) -> int:
+    return relax_follower(
+        follower_port=args.follower_port,
+        follower_id=args.follower_id,
+        calibration_dir_value=args.calibration_dir,
+    )
+
+
+def motor_scan(port: str, retries: int = 5) -> int:
+    from lerobot.motors.feetech import FeetechMotorsBus
+
+    bus = FeetechMotorsBus(port, {})
+    bus.connect(handshake=False)
+    try:
+        motors = bus.broadcast_ping(num_retry=retries, raise_on_error=False) or {}
+    finally:
+        if bus.is_connected:
+            bus.disconnect(disable_torque=False)
+
+    if not motors:
+        print(f"No Feetech motors found on {port}.")
+        return 1
+
+    print(f"Feetech motors found on {port}:")
+    for motor_id, model_number in sorted(motors.items()):
+        print(f"  id={motor_id}: model={model_number}")
+
+    expected = set(range(1, 7))
+    found = set(motors)
+    missing = sorted(expected - found)
+    extra = sorted(found - expected)
+    if missing:
+        print(f"Missing expected SO101 ids: {missing}")
+    if extra:
+        print(f"Extra ids: {extra}")
+
+    return 0 if not missing else 1
+
+
+def motor_scan_command(args: argparse.Namespace) -> int:
+    return motor_scan(args.port, retries=args.retries)
+
+
+def motor_read_test(port: str, seconds: float = 10.0, hz: float = 20.0, retries: int = 5) -> int:
+    from lerobot.motors import Motor, MotorNormMode
+    from lerobot.motors.feetech import FeetechMotorsBus
+
+    bus = FeetechMotorsBus(
+        port=port,
+        motors={
+            "shoulder_pan": Motor(1, "sts3215", MotorNormMode.DEGREES),
+            "shoulder_lift": Motor(2, "sts3215", MotorNormMode.DEGREES),
+            "elbow_flex": Motor(3, "sts3215", MotorNormMode.DEGREES),
+            "wrist_flex": Motor(4, "sts3215", MotorNormMode.DEGREES),
+            "wrist_roll": Motor(5, "sts3215", MotorNormMode.DEGREES),
+            "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+        },
+    )
+
+    interval_s = 1.0 / hz
+    deadline = time.perf_counter() + seconds
+    reads = 0
+    failures = 0
+    latencies_ms: list[float] = []
+    last_values = None
+
+    bus.connect(handshake=True)
+    try:
+        while time.perf_counter() < deadline:
+            start = time.perf_counter()
+            try:
+                last_values = bus.sync_read(
+                    "Present_Position",
+                    normalize=False,
+                    num_retry=retries,
+                )
+                reads += 1
+                latencies_ms.append((time.perf_counter() - start) * 1000)
+            except Exception as exc:
+                failures += 1
+                print(f"read failure #{failures}: {exc}")
+
+            sleep_s = interval_s - (time.perf_counter() - start)
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+    finally:
+        if bus.is_connected:
+            bus.disconnect(disable_torque=False)
+
+    print(f"reads={reads}, failures={failures}, seconds={seconds:.1f}, target_hz={hz:.1f}")
+    if latencies_ms:
+        print(
+            "latency_ms="
+            f"min={min(latencies_ms):.1f}, "
+            f"mean={sum(latencies_ms) / len(latencies_ms):.1f}, "
+            f"max={max(latencies_ms):.1f}"
+        )
+    if last_values is not None:
+        print("last_positions_raw:")
+        for motor, value in last_values.items():
+            print(f"  {motor}: {value}")
+
+    return 0 if failures == 0 else 1
+
+
+def motor_read_test_command(args: argparse.Namespace) -> int:
+    return motor_read_test(
+        args.port,
+        seconds=args.seconds,
+        hz=args.hz,
+        retries=args.retries,
+    )
+
+
+def motor_health(port: str, retries: int = 5, seconds: float = 0.0, hz: float = 10.0) -> int:
+    from lerobot.motors import Motor, MotorNormMode
+    from lerobot.motors.feetech import FeetechMotorsBus
+
+    bus = FeetechMotorsBus(
+        port=port,
+        motors={
+            "shoulder_pan": Motor(1, "sts3215", MotorNormMode.DEGREES),
+            "shoulder_lift": Motor(2, "sts3215", MotorNormMode.DEGREES),
+            "elbow_flex": Motor(3, "sts3215", MotorNormMode.DEGREES),
+            "wrist_flex": Motor(4, "sts3215", MotorNormMode.DEGREES),
+            "wrist_roll": Motor(5, "sts3215", MotorNormMode.DEGREES),
+            "gripper": Motor(6, "sts3215", MotorNormMode.RANGE_0_100),
+        },
+    )
+
+    fields = [
+        "Present_Voltage",
+        "Min_Voltage_Limit",
+        "Max_Voltage_Limit",
+        "Present_Temperature",
+        "Status",
+        "Present_Current",
+        "Present_Load",
+    ]
+
+    def read_health_once() -> dict[str, dict[str, float | int | str]]:
+        rows: dict[str, dict[str, float | int | str]] = {}
+        for field in fields:
+            try:
+                values = bus.sync_read(field, normalize=False, num_retry=retries)
+            except Exception as exc:
+                print(f"failed to read {field}: {exc}")
+                values = {}
+
+            for motor, value in values.items():
+                rows.setdefault(motor, {})[field] = value
+        return rows
+
+    rows: dict[str, dict[str, float | int | str]]
+    samples: dict[str, list[int]] = {}
+    status_samples: dict[str, list[int]] = {}
+
+    bus.connect(handshake=True)
+    try:
+        if seconds > 0:
+            interval_s = 1.0 / hz
+            deadline = time.perf_counter() + seconds
+            while time.perf_counter() < deadline:
+                start = time.perf_counter()
+                rows = read_health_once()
+                for motor, data in rows.items():
+                    voltage = data.get("Present_Voltage")
+                    status = data.get("Status")
+                    if isinstance(voltage, int):
+                        samples.setdefault(motor, []).append(voltage)
+                    if isinstance(status, int):
+                        status_samples.setdefault(motor, []).append(status)
+
+                sleep_s = interval_s - (time.perf_counter() - start)
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+
+            rows = read_health_once()
+        else:
+            rows = read_health_once()
+    finally:
+        if bus.is_connected:
+            bus.disconnect(disable_torque=False)
+
+    print(f"Feetech motor health on {port}:")
+    for motor, data in rows.items():
+        present_v = data.get("Present_Voltage")
+        min_v = data.get("Min_Voltage_Limit")
+        max_v = data.get("Max_Voltage_Limit")
+        voltage_text = "n/a"
+        if isinstance(present_v, int | float):
+            voltage_text = f"{present_v / 10:.1f} V raw={present_v}"
+
+        limit_text = "n/a"
+        if isinstance(min_v, int | float) and isinstance(max_v, int | float):
+            limit_text = f"{min_v / 10:.1f}-{max_v / 10:.1f} V"
+
+        print(
+            f"  {motor}: voltage={voltage_text}, limits={limit_text}, "
+            f"temp={data.get('Present_Temperature', 'n/a')}, "
+            f"status={data.get('Status', 'n/a')}, "
+            f"current={data.get('Present_Current', 'n/a')}, "
+            f"load={data.get('Present_Load', 'n/a')}"
+        )
+
+        voltage_samples = samples.get(motor, [])
+        if voltage_samples:
+            nonzero_statuses = sorted(
+                {status for status in status_samples.get(motor, []) if status != 0}
+            )
+            print(
+                f"    sampled_voltage={min(voltage_samples) / 10:.1f}-"
+                f"{max(voltage_samples) / 10:.1f} V "
+                f"(n={len(voltage_samples)}), "
+                f"nonzero_statuses={nonzero_statuses or 'none'}"
+            )
+
+    return 0
+
+
+def motor_health_command(args: argparse.Namespace) -> int:
+    return motor_health(args.port, retries=args.retries, seconds=args.seconds, hz=args.hz)
+
+
 def dataset_root_for_repo(repo_id: str) -> Path:
     _, _, name = repo_id.rpartition("/")
     if name.startswith("eval_"):
@@ -177,6 +433,24 @@ def remove_existing_dataset(repo_id: str) -> None:
         shutil.rmtree(dataset_path)
 
 
+def _record_fps(camera_config_path: Path, fps: int | None) -> int:
+    if fps is not None:
+        return fps
+
+    if not camera_config_path.exists():
+        return 30
+
+    camera_fps_values = [
+        int(camera["fps"])
+        for camera in cameras.load_camera_config(camera_config_path)
+        if camera.get("fps") is not None
+    ]
+    if not camera_fps_values:
+        return 30
+
+    return min(camera_fps_values)
+
+
 def record_dataset(
     leader_port: str,
     follower_port: str,
@@ -190,11 +464,13 @@ def record_dataset(
     episodes: int = 2,
     episode_time_s: int = 30,
     reset_time_s: int = 15,
+    fps: int | None = None,
     display_data: bool = True,
     push_to_hub: bool = False,
     resume: bool = False,
     overwrite: bool = False,
     encoder_threads: int = 2,
+    vcodec: str = "h264_nvenc",
     wait_start: bool = True,
 ) -> int:
     leader_id = leader_id or "leader"
@@ -202,6 +478,8 @@ def record_dataset(
     calib_dir = calibration_dir(calibration_dir_value)
     camera_config_path = Path(camera_config or cameras.DEFAULT_CONFIG_PATH)
     dataset_root_path = lerobot_dataset_path(repo_id, dataset_root)
+    dataset_fps = _record_fps(camera_config_path, fps)
+    camera_name_map = _base_smolvla_camera_name_map(camera_config_path)
 
     if overwrite and resume:
         raise RuntimeError("--overwrite and --resume cannot be used together")
@@ -213,6 +491,8 @@ def record_dataset(
     print("  Right arrow: finish the current episode/reset early")
     print("  Left arrow : discard and rerecord the current episode")
     print("  Esc        : stop recording")
+    if camera_name_map:
+        print(f"Using base SmolVLA camera names: {json.dumps(camera_name_map)}")
 
     if wait_start:
         os.environ["SO101_CAMERA_CONFIG"] = str(camera_config_path)
@@ -230,18 +510,21 @@ def record_dataset(
             f"--robot.port={follower_port}",
             f"--robot.id={follower_id}",
             f"--robot.calibration_dir={calib_dir}",
-            f"--robot.cameras={cameras.lerobot_cameras_arg(camera_config_path)}",
+            f"--robot.cameras={cameras.lerobot_cameras_arg(camera_config_path, camera_name_map)}",
             f"--display_data={str(display_data).lower()}",
+            "--play_sounds=false",
             f"--dataset.repo_id={repo_id}",
             f"--dataset.root={dataset_root_path}",
             f"--dataset.num_episodes={episodes}",
             f"--dataset.single_task={task}",
+            f"--dataset.fps={dataset_fps}",
             f"--dataset.episode_time_s={episode_time_s}",
             f"--dataset.reset_time_s={reset_time_s}",
             f"--dataset.push_to_hub={str(push_to_hub).lower()}",
             f"--resume={str(resume).lower()}",
             "--dataset.streaming_encoding=true",
             f"--dataset.encoder_threads={encoder_threads}",
+            f"--dataset.vcodec={vcodec}",
         ]
     )
 
@@ -262,11 +545,13 @@ def record_command(args: argparse.Namespace) -> int:
         episodes=args.episodes,
         episode_time_s=args.episode_time_s,
         reset_time_s=args.reset_time_s,
+        fps=args.fps,
         display_data=args.display_data,
         push_to_hub=args.push_to_hub,
         resume=args.resume,
         overwrite=args.overwrite,
         encoder_threads=args.encoder_threads,
+        vcodec=args.vcodec,
         wait_start=args.wait_start,
     )
 
@@ -285,11 +570,17 @@ def rollout_policy(
     episodes: int = 3,
     episode_time_s: int = 30,
     reset_time_s: int = 15,
+    fps: int = 5,
     display_data: bool = True,
     overwrite: bool = False,
     encoder_threads: int = 2,
+    vcodec: str = "auto",
     device: str = "cuda",
     use_amp: bool = True,
+    policy_num_steps: int | None = None,
+    policy_num_vlm_layers: int | None = None,
+    max_relative_target: float | None = 5.0,
+    disable_torque_on_disconnect: bool = False,
     interpolation_multiplier: int = 1,
     wait_start: bool = True,
 ) -> int:
@@ -299,6 +590,7 @@ def rollout_policy(
     calib_dir = calibration_dir(calibration_dir_value)
     camera_config_path = Path(camera_config or cameras.DEFAULT_CONFIG_PATH)
     dataset_root_path = lerobot_dataset_path(repo_id, dataset_root)
+    camera_name_map = _base_smolvla_camera_name_map(camera_config_path)
 
     if overwrite:
         remove_existing_dataset(repo_id)
@@ -307,6 +599,8 @@ def rollout_policy(
     print("  Right arrow: finish the current episode/reset early")
     print("  Left arrow : discard and rerecord the current episode")
     print("  Esc        : stop rollout")
+    if camera_name_map:
+        print(f"Using base SmolVLA camera names: {json.dumps(camera_name_map)}")
 
     if wait_start:
         os.environ["SO101_CAMERA_CONFIG"] = str(camera_config_path)
@@ -320,23 +614,35 @@ def rollout_policy(
             f"--robot.port={follower_port}",
             f"--robot.id={follower_id}",
             f"--robot.calibration_dir={calib_dir}",
-            f"--robot.cameras={cameras.lerobot_cameras_arg(camera_config_path)}",
+            f"--robot.cameras={cameras.lerobot_cameras_arg(camera_config_path, camera_name_map)}",
+            f"--robot.disable_torque_on_disconnect={str(disable_torque_on_disconnect).lower()}",
             f"--policy.path={policy_path}",
             f"--policy.device={device}",
             f"--policy.use_amp={str(use_amp).lower()}",
             f"--display_data={str(display_data).lower()}",
+            "--play_sounds=false",
             f"--dataset.repo_id={repo_id}",
             f"--dataset.root={dataset_root_path}",
             f"--dataset.num_episodes={episodes}",
             f"--dataset.single_task={task}",
+            f"--dataset.fps={fps}",
             f"--dataset.episode_time_s={episode_time_s}",
             f"--dataset.reset_time_s={reset_time_s}",
             "--dataset.push_to_hub=false",
             "--dataset.streaming_encoding=true",
             f"--dataset.encoder_threads={encoder_threads}",
+            f"--dataset.vcodec={vcodec}",
             f"--interpolation_multiplier={interpolation_multiplier}",
         ]
     )
+
+    if policy_num_steps is not None:
+        command.append(f"--policy.num_steps={policy_num_steps}")
+    if policy_num_vlm_layers is not None:
+        command.append(f"--policy.num_vlm_layers={policy_num_vlm_layers}")
+
+    if max_relative_target is not None:
+        command.append(f"--robot.max_relative_target={max_relative_target}")
 
     if leader_port:
         command.extend(
@@ -391,11 +697,17 @@ def rollout_command(args: argparse.Namespace) -> int:
         episodes=args.episodes,
         episode_time_s=args.episode_time_s,
         reset_time_s=args.reset_time_s,
+        fps=args.fps,
         display_data=args.display_data,
         overwrite=args.overwrite,
         encoder_threads=args.encoder_threads,
+        vcodec=args.vcodec,
         device=args.device,
         use_amp=args.use_amp,
+        policy_num_steps=args.policy_num_steps,
+        policy_num_vlm_layers=args.policy_num_vlm_layers,
+        max_relative_target=args.max_relative_target,
+        disable_torque_on_disconnect=args.disable_torque_on_disconnect,
         interpolation_multiplier=args.interpolation_multiplier,
         wait_start=args.wait_start,
     )
@@ -445,6 +757,68 @@ def dataset_info_command(args: argparse.Namespace) -> int:
 
 def _safe_name(value: str) -> str:
     return value.replace("/", "_").replace("\\", "_").replace(":", "_")
+
+
+def _base_smolvla_camera_name_map(camera_config_path: Path) -> dict[str, str]:
+    if not camera_config_path.exists():
+        return {}
+
+    camera_configs = cameras.load_camera_config(camera_config_path)
+    base_names = {"camera1", "camera2", "camera3"}
+    camera_names = [str(camera["name"]) for camera in camera_configs]
+    if all(name in base_names for name in camera_names):
+        return {}
+
+    used_targets = {name for name in camera_names if name in base_names}
+    name_map: dict[str, str] = {}
+    preferred_targets = {
+        "side": ("camera1", "camera3"),
+        "front": ("camera1", "camera3"),
+        "upper": ("camera1", "camera3"),
+        "top": ("camera1", "camera3"),
+        "wrist": ("camera2",),
+    }
+
+    for camera in camera_configs:
+        source_name = str(camera["name"])
+        explicit_name = camera.get("feature_name")
+        if explicit_name is None:
+            continue
+
+        target_name = str(explicit_name)
+        if target_name != source_name:
+            name_map[source_name] = target_name
+        used_targets.add(target_name)
+
+    for camera in camera_configs:
+        source_name = str(camera["name"])
+        if source_name in name_map or source_name in base_names:
+            continue
+
+        target_name = next(
+            (
+                candidate
+                for candidate in preferred_targets.get(source_name, ())
+                if candidate not in used_targets
+            ),
+            None,
+        )
+        if target_name is None:
+            target_name = next(
+                (
+                    f"camera{camera_index}"
+                    for camera_index in range(1, 4)
+                    if f"camera{camera_index}" not in used_targets
+                ),
+                None,
+            )
+        if target_name is None:
+            continue
+
+        name_map[source_name] = target_name
+        used_targets.add(target_name)
+
+    return name_map
 
 
 def _policy_eval_repo_id(repo_id: str) -> str:
@@ -620,6 +994,31 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     teleop_parser.set_defaults(disable_torque_on_disconnect=True)
     teleop_parser.set_defaults(func=teleoperate_command)
 
+    relax_parser = subparsers.add_parser("relax", aliases=["unlock"])
+    relax_parser.add_argument("--follower-port", required=True)
+    relax_parser.add_argument("--follower-id")
+    relax_parser.add_argument("--calibration-dir")
+    relax_parser.set_defaults(func=relax_command)
+
+    motor_scan_parser = subparsers.add_parser("motor-scan")
+    motor_scan_parser.add_argument("--port", required=True)
+    motor_scan_parser.add_argument("--retries", type=int, default=5)
+    motor_scan_parser.set_defaults(func=motor_scan_command)
+
+    motor_read_test_parser = subparsers.add_parser("motor-read-test")
+    motor_read_test_parser.add_argument("--port", required=True)
+    motor_read_test_parser.add_argument("--seconds", type=float, default=10.0)
+    motor_read_test_parser.add_argument("--hz", type=float, default=20.0)
+    motor_read_test_parser.add_argument("--retries", type=int, default=5)
+    motor_read_test_parser.set_defaults(func=motor_read_test_command)
+
+    motor_health_parser = subparsers.add_parser("motor-health")
+    motor_health_parser.add_argument("--port", required=True)
+    motor_health_parser.add_argument("--retries", type=int, default=5)
+    motor_health_parser.add_argument("--seconds", type=float, default=0.0)
+    motor_health_parser.add_argument("--hz", type=float, default=10.0)
+    motor_health_parser.set_defaults(func=motor_health_command)
+
     record_parser = subparsers.add_parser("record")
     record_parser.add_argument("--leader-port", required=True)
     record_parser.add_argument("--follower-port", required=True)
@@ -636,7 +1035,9 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     record_parser.add_argument("--episodes", type=int, default=2)
     record_parser.add_argument("--episode-time-s", type=int, default=30)
     record_parser.add_argument("--reset-time-s", type=int, default=15)
+    record_parser.add_argument("--fps", type=int)
     record_parser.add_argument("--encoder-threads", type=int, default=2)
+    record_parser.add_argument("--vcodec", default="h264_nvenc")
     record_parser.add_argument("--push-to-hub", action="store_true")
     record_parser.add_argument("--resume", action="store_true")
     record_parser.add_argument("--overwrite", action="store_true")
@@ -665,9 +1066,21 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     rollout_parser.add_argument("--episodes", type=int, default=3)
     rollout_parser.add_argument("--episode-time-s", type=int, default=30)
     rollout_parser.add_argument("--reset-time-s", type=int, default=15)
+    rollout_parser.add_argument("--fps", type=int, default=5)
     rollout_parser.add_argument("--encoder-threads", type=int, default=2)
+    rollout_parser.add_argument("--vcodec", default="auto")
     rollout_parser.add_argument("--device", default="cuda")
     rollout_parser.add_argument("--no-use-amp", action="store_false", dest="use_amp")
+    rollout_parser.add_argument("--policy-num-steps", type=int)
+    rollout_parser.add_argument("--policy-num-vlm-layers", type=int)
+    rollout_parser.add_argument("--max-relative-target", type=float, default=5.0)
+    rollout_parser.add_argument(
+        "--no-max-relative-target",
+        action="store_const",
+        const=None,
+        dest="max_relative_target",
+    )
+    rollout_parser.add_argument("--disable-torque-on-disconnect", action="store_true")
     rollout_parser.add_argument("--interpolation-multiplier", type=int, default=1)
     rollout_parser.add_argument("--overwrite", action="store_true")
     rollout_parser.add_argument("--no-wait-start", action="store_false", dest="wait_start")

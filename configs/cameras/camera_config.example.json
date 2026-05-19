@@ -2,19 +2,25 @@
   "cameras": [
     {
       "name": "wrist",
+      "feature_name": "camera2",
       "index": 0,
-      "width": 1280,
-      "height": 720,
-      "fps": 30,
+      "width": 640,
+      "height": 480,
+      "fps": 15,
+      "fourcc": "MJPG",
+      "backend": "DSHOW",
       "focus_lock_after_s": 5,
       "zoom": 0
     },
     {
       "name": "upper",
+      "feature_name": "camera1",
       "index": 1,
-      "width": 1280,
-      "height": 720,
-      "fps": 30,
+      "width": 640,
+      "height": 480,
+      "fps": 15,
+      "fourcc": "MJPG",
+      "backend": "DSHOW",
       "focus_lock_after_s": 5,
       "zoom": 0
     }

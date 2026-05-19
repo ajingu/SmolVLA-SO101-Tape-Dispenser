@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -9,6 +10,8 @@ from typing import Any
 import cv2
 from lerobot.cameras.opencv.camera_opencv import OpenCVCamera
 from lerobot.scripts import lerobot_record as lr
+
+DEFAULT_MOTOR_NUM_RETRY = 3
 
 
 def _load_camera_settings() -> dict[str, dict[str, Any]]:
@@ -75,6 +78,53 @@ def install_camera_settings() -> None:
     OpenCVCamera.connect = connect_with_settings
 
 
+def install_motor_bus_retries() -> None:
+    num_retry = int(os.environ.get("SO101_MOTOR_NUM_RETRY", DEFAULT_MOTOR_NUM_RETRY))
+    if num_retry <= 0:
+        return
+
+    from lerobot.motors.feetech import FeetechMotorsBus
+
+    original_write = FeetechMotorsBus.write
+    original_sync_read = FeetechMotorsBus.sync_read
+    original_sync_write = FeetechMotorsBus.sync_write
+
+    def write_with_retries(
+        self: FeetechMotorsBus,
+        data_name: str,
+        motor: str,
+        value: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        kwargs.setdefault("num_retry", num_retry)
+        return original_write(self, data_name, motor, value, *args, **kwargs)
+
+    def sync_read_with_retries(
+        self: FeetechMotorsBus,
+        data_name: str,
+        motors: Any = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        kwargs.setdefault("num_retry", num_retry)
+        return original_sync_read(self, data_name, motors, *args, **kwargs)
+
+    def sync_write_with_retries(
+        self: FeetechMotorsBus,
+        data_name: str,
+        values: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        kwargs.setdefault("num_retry", num_retry)
+        return original_sync_write(self, data_name, values, *args, **kwargs)
+
+    FeetechMotorsBus.write = write_with_retries
+    FeetechMotorsBus.sync_read = sync_read_with_retries
+    FeetechMotorsBus.sync_write = sync_write_with_retries
+
+
 def install_wait_before_first_episode() -> None:
     original_record_loop = lr.record_loop
     original_log_say = lr.log_say
@@ -100,18 +150,8 @@ def install_wait_before_first_episode() -> None:
 
         if not waiting_done and dataset is not None and events is not None:
             waiting_done = True
-            lr.log_say("Reset the environment. Press right arrow to start episode 0.", True)
-            original_record_loop(
-                **{
-                    **kwargs,
-                    "dataset": None,
-                    "policy": None,
-                    "preprocessor": None,
-                    "postprocessor": None,
-                    "interpolator": None,
-                    "control_time_s": 3600,
-                }
-            )
+            lr.log_say("Reset the environment. Press right arrow to start episode 0.", False)
+            _run_initial_wait_loop(original_record_loop, kwargs)
             events["exit_early"] = False
             if events["stop_recording"]:
                 return None
@@ -127,7 +167,33 @@ def install_wait_before_first_episode() -> None:
     lr.record_loop = record_loop_with_initial_wait
 
 
+def _run_initial_wait_loop(original_record_loop: Any, kwargs: dict[str, Any]) -> Any:
+    original_warning = logging.warning
+
+    def warning_without_expected_no_action(message: object, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(message, str) and message.startswith("No policy or teleoperator provided"):
+            return None
+        return original_warning(message, *args, **kwargs)
+
+    logging.warning = warning_without_expected_no_action
+    try:
+        return original_record_loop(
+            **{
+                **kwargs,
+                "dataset": None,
+                "policy": None,
+                "preprocessor": None,
+                "postprocessor": None,
+                "interpolator": None,
+                "control_time_s": 3600,
+            }
+        )
+    finally:
+        logging.warning = original_warning
+
+
 def main() -> None:
+    install_motor_bus_retries()
     install_camera_settings()
     install_wait_before_first_episode()
     lr.main()
