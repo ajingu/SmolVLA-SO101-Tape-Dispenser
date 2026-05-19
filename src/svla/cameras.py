@@ -137,6 +137,49 @@ def _apply_camera_properties(name: str, cap: cv2.VideoCapture, camera: dict[str,
         _lock_focus_after_autofocus(name, cap, float(focus_lock_after_s))
 
 
+def _config_default(cameras: list[dict[str, Any]], key: str, fallback: Any) -> Any:
+    for camera in cameras:
+        value = camera.get(key)
+        if value is not None:
+            return value
+    return fallback
+
+
+def _scan_camera_specs(
+    config_path: Path,
+    scan_max: int,
+    width: int | None,
+    height: int | None,
+    fps: int | None,
+) -> list[dict[str, Any]]:
+    configured_cameras = load_camera_config(config_path) if config_path.exists() else []
+    configured_by_index = {}
+    for camera in configured_cameras:
+        index_or_path = _camera_index_or_path(camera)
+        if isinstance(index_or_path, int):
+            configured_by_index[index_or_path] = dict(camera)
+
+    scan_width = _config_default(configured_cameras, "width", width)
+    scan_height = _config_default(configured_cameras, "height", height)
+    scan_fps = _config_default(configured_cameras, "fps", fps)
+    camera_specs = []
+
+    for index in range(scan_max + 1):
+        camera = configured_by_index.get(index, {})
+        camera_spec = {
+            "name": f"index_{index}",
+            "index": index,
+            "width": scan_width,
+            "height": scan_height,
+            "fps": scan_fps,
+        }
+        camera_spec.update(camera)
+        camera_spec["index"] = index
+        camera_specs.append(camera_spec)
+
+    return camera_specs
+
+
 def _camera_specs(
     config_path: Path,
     scan: bool,
@@ -146,16 +189,7 @@ def _camera_specs(
     fps: int | None,
 ) -> list[dict[str, Any]]:
     if scan:
-        return [
-            {
-                "name": f"index_{index}",
-                "index": index,
-                "width": width,
-                "height": height,
-                "fps": fps,
-            }
-            for index in range(scan_max + 1)
-        ]
+        return _scan_camera_specs(config_path, scan_max, width, height, fps)
 
     if config_path.exists():
         cameras = load_camera_config(config_path)
@@ -242,8 +276,10 @@ def preview_cameras(
     output_dir: Path,
     host: str,
     port: int,
+    preview_interval_ms: int,
 ) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
+    preview_interval_ms = max(50, preview_interval_ms)
     captures: list[dict[str, Any]] = []
 
     try:
@@ -281,9 +317,14 @@ def preview_cameras(
             print("No cameras were available.")
             return 1
 
-        server = _preview_server(captures, output_dir, host, port)
+        server = _preview_server(captures, output_dir, host, port, preview_interval_ms)
         print(f"Open preview: http://{host}:{server.server_port}")
-        print("Press Ctrl+C in this terminal to stop. Use the browser button to save snapshots.")
+        print(
+            "Press Ctrl+C in this terminal to stop. "
+            "Preview refreshes after each frame loads, "
+            f"with {preview_interval_ms} ms between frames. "
+            "Use the browser button to save snapshots."
+        )
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -301,21 +342,25 @@ def _preview_server(
     output_dir: Path,
     host: str,
     port: int,
+    preview_interval_ms: int,
 ) -> http.server.ThreadingHTTPServer:
     class PreviewHandler(http.server.BaseHTTPRequestHandler):
         def log_message(self, format: str, *args: Any) -> None:
             return
 
         def do_GET(self) -> None:
-            parsed_path = urlparse(self.path)
-            if parsed_path.path == "/":
-                return self._send_page()
-            if parsed_path.path == "/snapshot":
-                return self._save_snapshots()
-            if parsed_path.path.startswith("/camera/") and parsed_path.path.endswith(".jpg"):
-                camera_id_text = parsed_path.path.removeprefix("/camera/").removesuffix(".jpg")
-                return self._send_frame(camera_id_text)
-            self.send_error(404)
+            try:
+                parsed_path = urlparse(self.path)
+                if parsed_path.path == "/":
+                    return self._send_page()
+                if parsed_path.path == "/snapshot":
+                    return self._save_snapshots()
+                if parsed_path.path.startswith("/camera/") and parsed_path.path.endswith(".jpg"):
+                    camera_id_text = parsed_path.path.removeprefix("/camera/").removesuffix(".jpg")
+                    return self._send_frame(camera_id_text)
+                self.send_error(404)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                return
 
         def _send_page(self) -> None:
             cards = []
@@ -372,26 +417,29 @@ def _preview_server(
             <header><button onclick="saveSnapshots()">Save snapshots</button></header>
             <main>{body}</main>
             <script>
-                const intervalMs = 100;
-                function refresh() {{
-                for (const img of document.images) {{
+                const intervalMs = {preview_interval_ms};
+                function refreshImage(img) {{
                     img.src = `/camera/${{img.dataset.cameraId}}.jpg?t=${{Date.now()}}`;
                 }}
+                function scheduleRefresh(img) {{
+                    setTimeout(() => refreshImage(img), intervalMs);
                 }}
                 async function saveSnapshots() {{
-                await fetch('/snapshot');
+                    await fetch('/snapshot');
                 }}
-                setInterval(refresh, intervalMs);
+                for (const img of document.querySelectorAll('img[data-camera-id]')) {{
+                    img.addEventListener('load', () => scheduleRefresh(img));
+                    img.addEventListener('error', () => scheduleRefresh(img));
+                    if (img.complete) {{
+                        scheduleRefresh(img);
+                    }}
+                }}
             </script>
             </body>
             </html>
             """
             page_bytes = page.encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(page_bytes)))
-            self.end_headers()
-            self.wfile.write(page_bytes)
+            self._send_bytes(page_bytes, "text/html; charset=utf-8")
 
         def _send_frame(self, camera_id_text: str) -> None:
             try:
@@ -411,12 +459,7 @@ def _preview_server(
                 return
 
             frame_bytes = encoded.tobytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "image/jpeg")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", str(len(frame_bytes)))
-            self.end_headers()
-            self.wfile.write(frame_bytes)
+            self._send_bytes(frame_bytes, "image/jpeg", cache_control="no-store")
 
         def _save_snapshots(self) -> None:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -431,11 +474,24 @@ def _preview_server(
                 print(f"{capture['name']}: snapshot={image_path}")
 
             response = "\n".join(saved_paths).encode("utf-8")
-            self.send_response(200)
-            self.send_header("Content-Type", "text/plain; charset=utf-8")
-            self.send_header("Content-Length", str(len(response)))
-            self.end_headers()
-            self.wfile.write(response)
+            self._send_bytes(response, "text/plain; charset=utf-8")
+
+        def _send_bytes(
+            self,
+            response_bytes: bytes,
+            content_type: str,
+            cache_control: str | None = None,
+        ) -> None:
+            try:
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                if cache_control is not None:
+                    self.send_header("Cache-Control", cache_control)
+                self.send_header("Content-Length", str(len(response_bytes)))
+                self.end_headers()
+                self.wfile.write(response_bytes)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                return
 
     return http.server.ThreadingHTTPServer((host, port), PreviewHandler)
 
@@ -464,6 +520,7 @@ def cameras_command(args: argparse.Namespace) -> int:
             output_dir=Path(args.output_dir),
             host=args.preview_host,
             port=args.preview_port,
+            preview_interval_ms=args.preview_interval_ms,
         )
 
     return check_cameras(
@@ -487,4 +544,5 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     parser.add_argument("--preview", action="store_true")
     parser.add_argument("--preview-host", default="127.0.0.1")
     parser.add_argument("--preview-port", type=int, default=8765)
+    parser.add_argument("--preview-interval-ms", type=int, default=100)
     parser.set_defaults(func=cameras_command)
