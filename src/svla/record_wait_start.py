@@ -12,6 +12,14 @@ from lerobot.cameras.opencv.camera_opencv import OpenCVCamera
 from lerobot.scripts import lerobot_record as lr
 
 DEFAULT_MOTOR_NUM_RETRY = 3
+DEFAULT_PARK_POSE = {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": -102.5,
+    "elbow_flex": 94.0,
+    "wrist_flex": 71.0,
+    "wrist_roll": -1.0,
+    "gripper": 1.2,
+}
 
 
 def _load_camera_settings() -> dict[str, dict[str, Any]]:
@@ -125,6 +133,66 @@ def install_motor_bus_retries() -> None:
     FeetechMotorsBus.sync_write = sync_write_with_retries
 
 
+def install_park_on_disconnect() -> None:
+    if os.environ.get("SO101_PARK_ON_EXIT", "false").lower() != "true":
+        return
+
+    from lerobot.robots.so_follower.so_follower import SOFollower
+
+    original_disconnect = SOFollower.disconnect
+
+    def disconnect_with_park(self: SOFollower, *args: Any, **kwargs: Any) -> Any:
+        if self.bus.is_connected:
+            _park_follower(self)
+        return original_disconnect(self, *args, **kwargs)
+
+    SOFollower.disconnect = disconnect_with_park
+
+
+def _park_follower(robot: Any) -> None:
+    pose = _load_park_pose()
+    duration_s = float(os.environ.get("SO101_PARK_DURATION_S", "3.0"))
+    steps = max(1, int(duration_s * 20))
+
+    try:
+        present = robot.bus.sync_read("Present_Position")
+    except Exception:
+        logging.exception("Failed to read follower pose before parking.")
+        return
+
+    motors = [motor for motor in robot.bus.motors if motor in pose and motor in present]
+    if not motors:
+        return
+
+    logging.info("Parking follower before disconnect.")
+    for step in range(1, steps + 1):
+        ratio = step / steps
+        target = {
+            motor: present[motor] + (float(pose[motor]) - present[motor]) * ratio
+            for motor in motors
+        }
+        try:
+            robot.bus.sync_write("Goal_Position", target)
+        except Exception:
+            logging.exception("Failed to send follower park pose.")
+            return
+        time.sleep(duration_s / steps)
+
+
+def _load_park_pose() -> dict[str, float]:
+    pose_text = os.environ.get("SO101_PARK_POSE")
+    if not pose_text:
+        return DEFAULT_PARK_POSE
+
+    try:
+        pose = json.loads(pose_text)
+    except json.JSONDecodeError:
+        logging.exception("Invalid SO101_PARK_POSE JSON; using default park pose.")
+        return DEFAULT_PARK_POSE
+
+    return {str(key): float(value) for key, value in pose.items()}
+
+
 def install_wait_before_first_episode() -> None:
     original_record_loop = lr.record_loop
     original_log_say = lr.log_say
@@ -195,6 +263,7 @@ def _run_initial_wait_loop(original_record_loop: Any, kwargs: dict[str, Any]) ->
 def main() -> None:
     install_motor_bus_retries()
     install_camera_settings()
+    install_park_on_disconnect()
     install_wait_before_first_episode()
     lr.main()
 

@@ -570,7 +570,7 @@ def rollout_policy(
     episodes: int = 3,
     episode_time_s: int = 30,
     reset_time_s: int = 15,
-    fps: int = 5,
+    fps: int = 30,
     display_data: bool = True,
     overwrite: bool = False,
     encoder_threads: int = 2,
@@ -581,6 +581,8 @@ def rollout_policy(
     policy_num_vlm_layers: int | None = None,
     max_relative_target: float | None = 5.0,
     disable_torque_on_disconnect: bool = False,
+    park_on_exit: bool = True,
+    park_duration_s: float = 3.0,
     interpolation_multiplier: int = 1,
     wait_start: bool = True,
 ) -> int:
@@ -604,6 +606,8 @@ def rollout_policy(
 
     if wait_start:
         os.environ["SO101_CAMERA_CONFIG"] = str(camera_config_path)
+        os.environ["SO101_PARK_ON_EXIT"] = str(park_on_exit).lower()
+        os.environ["SO101_PARK_DURATION_S"] = str(park_duration_s)
         command = [sys.executable, "-m", "svla.record_wait_start"]
     else:
         command = ["lerobot-record"]
@@ -708,6 +712,8 @@ def rollout_command(args: argparse.Namespace) -> int:
         policy_num_vlm_layers=args.policy_num_vlm_layers,
         max_relative_target=args.max_relative_target,
         disable_torque_on_disconnect=args.disable_torque_on_disconnect,
+        park_on_exit=args.park_on_exit,
+        park_duration_s=args.park_duration_s,
         interpolation_multiplier=args.interpolation_multiplier,
         wait_start=args.wait_start,
     )
@@ -835,6 +841,46 @@ def _policy_eval_repo_id(repo_id: str) -> str:
     return eval_repo_id
 
 
+def _resolve_policy_pretrained_path(pretrained_path: str | None) -> str | None:
+    if not pretrained_path:
+        return None
+
+    path = Path(pretrained_path)
+    if path.exists():
+        return str(path)
+
+    if "/" not in pretrained_path:
+        return pretrained_path
+
+    from huggingface_hub import snapshot_download
+
+    try:
+        return snapshot_download(repo_id=pretrained_path, local_files_only=True)
+    except Exception:
+        return snapshot_download(repo_id=pretrained_path)
+
+
+def _resolve_resume_config_path(output_dir_path: Path, config_path: str | None) -> str:
+    if config_path:
+        return str(Path(config_path))
+
+    checkpoints_dir = output_dir_path / "checkpoints"
+    if not checkpoints_dir.exists():
+        raise FileNotFoundError(f"No checkpoints directory found: {checkpoints_dir}")
+
+    checkpoint_dirs = sorted(
+        path for path in checkpoints_dir.iterdir() if path.is_dir() and path.name.isdigit()
+    )
+    if not checkpoint_dirs:
+        raise FileNotFoundError(f"No numeric checkpoints found in: {checkpoints_dir}")
+
+    train_config_path = checkpoint_dirs[-1] / "pretrained_model" / "train_config.json"
+    if not train_config_path.exists():
+        raise FileNotFoundError(f"Checkpoint train config not found: {train_config_path}")
+
+    return str(train_config_path)
+
+
 def train_policy(
     repo_id: str,
     dataset_root: str | None = None,
@@ -843,8 +889,11 @@ def train_policy(
     device: str = "cuda",
     output_dir: str | None = None,
     job_name: str | None = None,
+    resume: bool = False,
+    config_path: str | None = None,
     steps: int = 3000,
     batch_size: int = 8,
+    log_freq: int = 200,
     save_freq: int = 1000,
     eval_freq: int = 0,
     use_amp: bool = True,
@@ -861,9 +910,15 @@ def train_policy(
     dataset_root_path = lerobot_dataset_path(repo_id, dataset_root)
     run_name = job_name or f"{policy}_{_safe_name(repo_id)}"
     output_dir_path = Path(output_dir) if output_dir else DEFAULT_TRAIN_OUTPUT_DIR / run_name
+    resolved_pretrained_path = _resolve_policy_pretrained_path(pretrained_path)
+    resolved_config_path = (
+        _resolve_resume_config_path(output_dir_path, config_path) if resume else None
+    )
 
     command = [
-        "lerobot-train",
+        sys.executable,
+        "-m",
+        "svla.train_compat",
         f"--dataset.repo_id={repo_id}",
         f"--dataset.root={dataset_root_path}",
         f"--policy.type={policy}",
@@ -874,14 +929,19 @@ def train_policy(
         f"--job_name={run_name}",
         f"--steps={steps}",
         f"--batch_size={batch_size}",
+        f"--log_freq={log_freq}",
         f"--save_freq={save_freq}",
         f"--eval_freq={eval_freq}",
         f"--wandb.enable={str(wandb).lower()}",
         "--wandb.disable_artifact=true",
     ]
+    if resume:
+        command.append("--resume=true")
+    if resolved_config_path:
+        command.append(f"--config_path={resolved_config_path}")
 
-    if pretrained_path:
-        command.append(f"--policy.pretrained_path={pretrained_path}")
+    if resolved_pretrained_path:
+        command.append(f"--policy.pretrained_path={resolved_pretrained_path}")
     if image_aug:
         command.extend(
             [
@@ -911,8 +971,11 @@ def train_command(args: argparse.Namespace) -> int:
         device=args.device,
         output_dir=args.output_dir,
         job_name=args.job_name,
+        resume=args.resume,
+        config_path=args.config_path,
         steps=args.steps,
         batch_size=args.batch_size,
+        log_freq=args.log_freq,
         save_freq=args.save_freq,
         eval_freq=args.eval_freq,
         use_amp=args.use_amp,
@@ -932,11 +995,13 @@ def replay_episode(
     follower_port: str,
     repo_id: str,
     episode: int,
+    dataset_root: str | None = None,
     follower_id: str | None = None,
     calibration_dir_value: str | None = None,
 ) -> int:
     follower_id = follower_id or "follower"
     calib_dir = calibration_dir(calibration_dir_value)
+    dataset_root_path = lerobot_dataset_path(repo_id, dataset_root)
 
     return run(
         [
@@ -946,6 +1011,7 @@ def replay_episode(
             f"--robot.id={follower_id}",
             f"--robot.calibration_dir={calib_dir}",
             f"--dataset.repo_id={repo_id}",
+            f"--dataset.root={dataset_root_path}",
             f"--dataset.episode={episode}",
         ]
     )
@@ -956,6 +1022,7 @@ def replay_command(args: argparse.Namespace) -> int:
         follower_port=args.follower_port,
         repo_id=args.repo_id,
         episode=args.episode,
+        dataset_root=args.dataset_root,
         follower_id=args.follower_id,
         calibration_dir_value=args.calibration_dir,
     )
@@ -1066,7 +1133,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     rollout_parser.add_argument("--episodes", type=int, default=3)
     rollout_parser.add_argument("--episode-time-s", type=int, default=30)
     rollout_parser.add_argument("--reset-time-s", type=int, default=15)
-    rollout_parser.add_argument("--fps", type=int, default=5)
+    rollout_parser.add_argument("--fps", type=int, default=30)
     rollout_parser.add_argument("--encoder-threads", type=int, default=2)
     rollout_parser.add_argument("--vcodec", default="auto")
     rollout_parser.add_argument("--device", default="cuda")
@@ -1081,6 +1148,8 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
         dest="max_relative_target",
     )
     rollout_parser.add_argument("--disable-torque-on-disconnect", action="store_true")
+    rollout_parser.add_argument("--no-park-on-exit", action="store_false", dest="park_on_exit")
+    rollout_parser.add_argument("--park-duration-s", type=float, default=3.0)
     rollout_parser.add_argument("--interpolation-multiplier", type=int, default=1)
     rollout_parser.add_argument("--overwrite", action="store_true")
     rollout_parser.add_argument("--no-wait-start", action="store_false", dest="wait_start")
@@ -1090,6 +1159,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     rollout_parser.set_defaults(display_data=True)
     rollout_parser.set_defaults(use_amp=True)
     rollout_parser.set_defaults(wait_start=True)
+    rollout_parser.set_defaults(park_on_exit=True)
     rollout_parser.set_defaults(func=rollout_command)
 
     smolvla_check_parser = subparsers.add_parser("smolvla-check")
@@ -1103,8 +1173,11 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     train_parser.add_argument("--device", default="cuda")
     train_parser.add_argument("--output-dir")
     train_parser.add_argument("--job-name")
+    train_parser.add_argument("--resume", action="store_true")
+    train_parser.add_argument("--config-path")
     train_parser.add_argument("--steps", type=int, default=3000)
     train_parser.add_argument("--batch-size", type=int, default=8)
+    train_parser.add_argument("--log-freq", type=int, default=200)
     train_parser.add_argument("--save-freq", type=int, default=1000)
     train_parser.add_argument("--eval-freq", type=int, default=0)
     train_parser.add_argument("--no-use-amp", action="store_false", dest="use_amp")
@@ -1135,6 +1208,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     replay_parser = subparsers.add_parser("replay")
     replay_parser.add_argument("--follower-port", required=True)
     replay_parser.add_argument("--repo-id", required=True)
+    replay_parser.add_argument("--dataset-root")
     replay_parser.add_argument("--episode", type=int, default=0)
     replay_parser.add_argument("--follower-id")
     replay_parser.add_argument("--calibration-dir")
