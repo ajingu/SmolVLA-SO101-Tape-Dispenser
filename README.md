@@ -10,7 +10,11 @@ and prompt, the base SmolVLA checkpoint completed 0/8 rollouts. The
 main failure mode in the fine-tuned policy was recovery after a missed grasp: once the object was pushed
 into an unseen pose, the policy often failed to re-grasp it.
 
-<!-- Add a short rollout video or GIF here. -->
+
+
+https://github.com/user-attachments/assets/7a06d129-9cae-4e7a-829c-34e86cd26347
+
+
 
 This is a small real-robot fine-tuning experiment, not a robust benchmark.
 This project builds on the SO-ARM workflow from [my previous tape-dispenser
@@ -22,11 +26,8 @@ demonstration datasets, and rollout datasets need to be kept organized.
 ## Overview
 
 - Robot: SO-ARM101/SO-101 leader arm + follower arm
-- Cameras: external USB cameras configured through LeRobot OpenCV cameras
+- Cameras: 2 external USB cameras (wrist + side)
 - Policy: SmolVLA via LeRobot
-- Base checkpoint: `lerobot/smolvla_base`
-- Training data: local LeRobot datasets under `outputs/datasets/train/`
-- Evaluation data: policy rollouts under `outputs/datasets/eval/`
 
 ## Setup
 
