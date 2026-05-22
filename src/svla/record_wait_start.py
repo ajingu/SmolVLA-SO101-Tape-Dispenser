@@ -193,6 +193,17 @@ def _load_park_pose() -> dict[str, float]:
     return {str(key): float(value) for key, value in pose.items()}
 
 
+def install_expected_warning_filter() -> None:
+    original_warning = logging.warning
+
+    def warning_without_expected_no_action(message: object, *args: Any, **kwargs: Any) -> Any:
+        if isinstance(message, str) and message.startswith("No policy or teleoperator provided"):
+            return None
+        return original_warning(message, *args, **kwargs)
+
+    logging.warning = warning_without_expected_no_action
+
+
 def install_wait_before_first_episode() -> None:
     original_record_loop = lr.record_loop
     original_log_say = lr.log_say
@@ -215,6 +226,7 @@ def install_wait_before_first_episode() -> None:
 
         dataset = kwargs.get("dataset")
         events = kwargs.get("events")
+        policy = kwargs.get("policy")
 
         if not waiting_done and dataset is not None and events is not None:
             waiting_done = True
@@ -229,41 +241,45 @@ def install_wait_before_first_episode() -> None:
                 original_log_say(message, play_sounds)
                 pending_recording_message = None
 
+        elif waiting_done and dataset is None and policy is None:
+            _park_before_reset_wait(kwargs)
+
         return original_record_loop(*args, **kwargs)
 
     lr.log_say = log_say_with_initial_wait
     lr.record_loop = record_loop_with_initial_wait
 
 
+def _park_before_reset_wait(kwargs: dict[str, Any]) -> None:
+    if os.environ.get("SO101_PARK_ON_RESET", "false").lower() != "true":
+        return
+
+    robot = kwargs.get("robot")
+    if robot is None or not getattr(robot, "is_connected", False):
+        return
+
+    _park_follower(robot)
+
+
 def _run_initial_wait_loop(original_record_loop: Any, kwargs: dict[str, Any]) -> Any:
-    original_warning = logging.warning
-
-    def warning_without_expected_no_action(message: object, *args: Any, **kwargs: Any) -> Any:
-        if isinstance(message, str) and message.startswith("No policy or teleoperator provided"):
-            return None
-        return original_warning(message, *args, **kwargs)
-
-    logging.warning = warning_without_expected_no_action
-    try:
-        return original_record_loop(
-            **{
-                **kwargs,
-                "dataset": None,
-                "policy": None,
-                "preprocessor": None,
-                "postprocessor": None,
-                "interpolator": None,
-                "control_time_s": 3600,
-            }
-        )
-    finally:
-        logging.warning = original_warning
+    return original_record_loop(
+        **{
+            **kwargs,
+            "dataset": None,
+            "policy": None,
+            "preprocessor": None,
+            "postprocessor": None,
+            "interpolator": None,
+            "control_time_s": 3600,
+        }
+    )
 
 
 def main() -> None:
     install_motor_bus_retries()
     install_camera_settings()
     install_park_on_disconnect()
+    install_expected_warning_filter()
     install_wait_before_first_episode()
     lr.main()
 

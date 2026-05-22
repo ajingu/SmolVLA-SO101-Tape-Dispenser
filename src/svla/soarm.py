@@ -582,6 +582,7 @@ def rollout_policy(
     max_relative_target: float | None = 5.0,
     disable_torque_on_disconnect: bool = False,
     park_on_exit: bool = True,
+    park_on_reset: bool = True,
     park_duration_s: float = 3.0,
     interpolation_multiplier: int = 1,
     wait_start: bool = True,
@@ -607,6 +608,7 @@ def rollout_policy(
     if wait_start:
         os.environ["SO101_CAMERA_CONFIG"] = str(camera_config_path)
         os.environ["SO101_PARK_ON_EXIT"] = str(park_on_exit).lower()
+        os.environ["SO101_PARK_ON_RESET"] = str(park_on_reset).lower()
         os.environ["SO101_PARK_DURATION_S"] = str(park_duration_s)
         command = [sys.executable, "-m", "svla.record_wait_start"]
     else:
@@ -713,6 +715,7 @@ def rollout_command(args: argparse.Namespace) -> int:
         max_relative_target=args.max_relative_target,
         disable_torque_on_disconnect=args.disable_torque_on_disconnect,
         park_on_exit=args.park_on_exit,
+        park_on_reset=args.park_on_reset,
         park_duration_s=args.park_duration_s,
         interpolation_multiplier=args.interpolation_multiplier,
         wait_start=args.wait_start,
@@ -1149,6 +1152,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     )
     rollout_parser.add_argument("--disable-torque-on-disconnect", action="store_true")
     rollout_parser.add_argument("--no-park-on-exit", action="store_false", dest="park_on_exit")
+    rollout_parser.add_argument("--no-park-on-reset", action="store_false", dest="park_on_reset")
     rollout_parser.add_argument("--park-duration-s", type=float, default=3.0)
     rollout_parser.add_argument("--interpolation-multiplier", type=int, default=1)
     rollout_parser.add_argument("--overwrite", action="store_true")
@@ -1160,6 +1164,7 @@ def register_parsers(subparsers: argparse._SubParsersAction) -> None:
     rollout_parser.set_defaults(use_amp=True)
     rollout_parser.set_defaults(wait_start=True)
     rollout_parser.set_defaults(park_on_exit=True)
+    rollout_parser.set_defaults(park_on_reset=True)
     rollout_parser.set_defaults(func=rollout_command)
 
     smolvla_check_parser = subparsers.add_parser("smolvla-check")
