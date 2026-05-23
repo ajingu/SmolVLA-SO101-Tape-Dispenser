@@ -1,22 +1,10 @@
 # SmolVLA Fine-Tuning for SO-ARM101 / SO-101
 
-I fine-tuned SmolVLA with behavior cloning on 20 teleoperated demonstrations
-for a real SO-ARM101/SO-101 manipulation task: placing a blue tape dispenser
-into a red box.
-
-The fine-tuned policy completed the task in 5/8 evaluation rollouts with small
-object position and rotation changes. Under the same robot, cameras, object,
-and prompt, the base SmolVLA checkpoint completed 0/8 rollouts. The
-main failure mode in the fine-tuned policy was recovery after a missed grasp: once the object was pushed
-into an unseen pose, the policy often failed to re-grasp it.
-
-
+Behavior-cloning fine-tuning of SmolVLA for a real SO-ARM101/SO-101
+tape-dispenser pick-and-place task.
 
 https://github.com/user-attachments/assets/7a06d129-9cae-4e7a-829c-34e86cd26347
 
-
-
-This is a small real-robot fine-tuning experiment, not a robust benchmark.
 This project builds on the SO-ARM workflow from [my previous tape-dispenser
 project](https://github.com/ajingu/Imitation-Learning_Tape-Dispenser), but uses
 LeRobot SmolVLA as the default policy. It is intended for small real-world
@@ -28,6 +16,27 @@ demonstration datasets, and rollout datasets need to be kept organized.
 - Robot: SO-ARM101/SO-101 leader arm + follower arm
 - Cameras: 2 external USB cameras (wrist + side)
 - Policy: SmolVLA via LeRobot
+
+## Data and Evaluation
+
+I collected 20 teleoperated demonstrations for a single language task:
+
+`Put the blue tape dispenser in the red box.`
+
+The fine-tuned policy completed the task in 5/8 evaluation rollouts with small
+object position and rotation changes. Under the same robot, cameras, object,
+and prompt, the base SmolVLA checkpoint completed 0/8 rollouts.
+
+This is a small real-robot fine-tuning experiment, not a robust benchmark. The
+main failure mode was recovery after a missed grasp: once the object was pushed
+into an unseen pose, the policy often failed to re-grasp it.
+
+Videos:
+
+- [5 fine-tuned success examples](artifacts/SmolVLA_fine-tuned_5-success-examples.mp4)
+- [Full 8-rollout fine-tuned evaluation](artifacts/SmolVLA_fine-tuned_8-evals.mp4)
+
+- [Base SmolVLA vs fine-tuned SmolVLA](artifacts/SmolVLA_base-vs-finetuned.mp4)
 
 ## Setup
 
