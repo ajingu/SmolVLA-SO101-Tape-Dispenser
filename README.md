@@ -34,6 +34,7 @@ main failure mode was recovery after a missed grasp: once the object was pushed
 into an unseen pose, the policy often failed to re-grasp it.
 
 - [Full 8-rollout fine-tuned evaluation](artifacts/SmolVLA_fine-tuned_8-evals.mp4)
+- [Fine-Tuned model](https://huggingface.co/Ajingu/smolvla-so101-tape-dispenser)
 
 ## Setup
 
