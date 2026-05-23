@@ -5,6 +5,8 @@ tape-dispenser pick-and-place task.
 
 https://github.com/user-attachments/assets/7a06d129-9cae-4e7a-829c-34e86cd26347
 
+https://github.com/user-attachments/assets/65094197-6f90-4377-aafe-b6e1a47881d4
+
 This project builds on the SO-ARM workflow from [my previous tape-dispenser
 project](https://github.com/ajingu/Imitation-Learning_Tape-Dispenser), but uses
 LeRobot SmolVLA as the default policy. It is intended for small real-world
@@ -31,12 +33,7 @@ This is a small real-robot fine-tuning experiment, not a robust benchmark. The
 main failure mode was recovery after a missed grasp: once the object was pushed
 into an unseen pose, the policy often failed to re-grasp it.
 
-Videos:
-
-- [5 fine-tuned success examples](artifacts/SmolVLA_fine-tuned_5-success-examples.mp4)
 - [Full 8-rollout fine-tuned evaluation](artifacts/SmolVLA_fine-tuned_8-evals.mp4)
-
-- [Base SmolVLA vs fine-tuned SmolVLA](artifacts/SmolVLA_base-vs-finetuned.mp4)
 
 ## Setup
 
